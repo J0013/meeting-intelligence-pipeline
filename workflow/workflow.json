@@ -1,0 +1,304 @@
+{
+  "name": "Flujo de resúmenes de reuniones (demo)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "subject:Plaud-AutoFlow"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "9edb4fc7-230f-4870-b05c-ac156bd95bd4",
+      "name": "Correo Plaud (Gmail Trigger)",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        96,
+        -160
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "<TU_CREDENCIAL_GMAIL>",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Plaud entrega DOS adjuntos: transcripción.txt y resumen.txt\n// Los separa por NOMBRE y los decodifica con el helper de n8n (evita corrupción).\nconst item = $input.first();\nconst binarios = item.binary || {};\nlet transcripcion = null;\nlet resumen = null;\nfor (const clave of Object.keys(binarios)) {\n  const nombre = (binarios[clave].fileName || '').toLowerCase();\n  const buffer = await this.helpers.getBinaryDataBuffer(0, clave);\n  const contenido = buffer.toString('utf-8');\n  if (nombre.includes('transcrip')) {\n    transcripcion = contenido;\n  } else if (nombre.includes('resumen')) {\n    resumen = contenido;\n  }\n}\nif (!transcripcion) throw new Error('No se encontró el adjunto de transcripción');\nif (!resumen) throw new Error('No se encontró el adjunto de resumen');\n\nconst asunto = item.json.subject || '';\n// Formato nuevo de Plaud: \"[Plaud-AutoFlow] 2026-06-24 10:31:45\" → captura YYYY-MM-DD directo\nlet fechaReunion = null;\nconst fechaCompleta = asunto.match(/(\\d{4})-(\\d{2})-(\\d{2})/);  // busca 2026-06-24\nif (fechaCompleta) {\n  fechaReunion = `${fechaCompleta[1]}-${fechaCompleta[2]}-${fechaCompleta[3]}`;  // ya es YYYY-MM-DD\n} else {\n  // Compatibilidad con formato viejo: \"06-18\" (MM-DD)\n  const fechaCorta = asunto.match(/(\\d{2})-(\\d{2})/);\n  const anio = new Date(item.json.date || Date.now()).getFullYear();\n  fechaReunion = fechaCorta ? `${anio}-${fechaCorta[1]}-${fechaCorta[2]}` : null;\n}\n\nreturn [{\n  json: {\n    subject: asunto,\n    fecha_reunion: fechaReunion,\n    transcripcion: transcripcion,\n    resumen: resumen,\n    cliente_id: 'client_demo',\n    cliente_nombre: 'Empresa Demo S.L.',\n    cliente_ceo: 'Persona A'\n  }\n}];"
+      },
+      "id": "c7c5c031-4142-48e1-b60b-65235d5fcb06",
+      "name": "Parser Plaud",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO transcripciones\n  (cliente_id, cliente_nombre, cliente_ceo, fecha_reunion, asunto, transcripcion, resumen, content_hash)\nVALUES\n  ($1, $2, $3, $4, $5, $6, $7, encode(digest($6, 'sha256'), 'hex'))\nON CONFLICT (content_hash) DO NOTHING\nRETURNING *;",
+        "options": {
+          "queryReplacement": "={{ $json.cliente_id }},{{ $json.cliente_nombre }},{{ $json.cliente_ceo }},{{ $json.fecha_reunion }},{{ $json.subject }},{{ $json.transcripcion }},{{ $json.resumen }}"
+        }
+      },
+      "id": "2c387365-4084-44dc-8c26-c2cec7303d6a",
+      "name": "Guardar transcripción (Postgres)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        432,
+        -160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "<TU_CREDENCIAL_POSTGRES>",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "demo@ejemplo.com",
+        "subject": "={{ $('Code in JavaScript').item.json.asunto }}",
+        "message": "={{ $('Code in JavaScript').item.json.resumen_html }}",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {}
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1648,
+        -208
+      ],
+      "id": "f4ec3f8b-a86b-49bc-a736-7b31d8b0304f",
+      "name": "Send a message",
+      "webhookId": "",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "<TU_CREDENCIAL_GMAIL>",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convierte el resumen de Plaud (markdown) para el correo (HTML) y para el DOCX (texto plano)\nconst item = $input.first();\nconst original = item.json.resumen || '';\n// Elimina las referencias a imágenes markdown que mete Plaud: ![PLAUD NOTE](...png)\nconst limpioOriginal = original.replace(/!\\[[^\\]]*\\]\\([^)]*\\)/g, '').trim();\nconst asunto = String(item.json.asunto || '');\n// Formato nuevo de Plaud: \"[Plaud-AutoFlow] 2026-06-24 10:36:02\" → captura YYYY-MM-DD\nlet fechaES = '';\nconst mNueva = asunto.match(/(\\d{4})-(\\d{2})-(\\d{2})/);  // busca 2026-06-24\nif (mNueva) {\n  fechaES = `${mNueva[3]}/${mNueva[2]}/${mNueva[1]}`;  // \"24/06/2026\"\n} else {\n  // Respaldo formato viejo \"06-22\"\n  const mVieja = asunto.match(/(\\d{2})-(\\d{2})/);\n  const anio = String(item.json.fecha_reunion || '').slice(0, 4) || '2026';\n  fechaES = mVieja ? `${mVieja[2]}/${mVieja[1]}/${anio}` : '';\n}\n// Hora de la reunión desde el asunto: \"...10:36:02\" → \"10-36\"\nconst mHora = asunto.match(/(\\d{2}):(\\d{2}):(\\d{2})/);\nconst horaArchivo = mHora ? `${mHora[1]}h${mHora[2]}` : '';  // \"10h36\"\n// ===== 1) HTML BONITO PARA EL CORREO =====\nlet texto = limpioOriginal;\ntexto = texto.replace(/\\\\n/g, '\\n');\ntexto = texto.replace(/^###\\s*(.+)$/gm, '<h3 style=\"color:#2c5f2d;margin:18px 0 8px;\">$1</h3>');\ntexto = texto.replace(/^##\\s*(.+)$/gm, '<h2 style=\"color:#2c5f2d;margin:20px 0 10px;\">$1</h2>');\ntexto = texto.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');\ntexto = texto.replace(/^[-*]\\s+(.+)$/gm, '<li style=\"margin:4px 0;\">$1</li>');\ntexto = texto.replace(/(<li[\\s\\S]*?<\\/li>)(?!\\s*<li)/g, '<ul style=\"margin:8px 0;padding-left:22px;\">$1</ul>');\ntexto = texto.replace(/\\n{2,}/g, '</p><p style=\"margin:10px 0;line-height:1.6;\">');\ntexto = texto.replace(/\\n/g, '<br>');\nconst html = `\n<div style=\"font-family:Arial,sans-serif;color:#333;max-width:640px;margin:0 auto;padding:20px;\">\n  <div style=\"border-bottom:3px solid #2c5f2d;padding-bottom:12px;margin-bottom:16px;\">\n    <h1 style=\"color:#2c5f2d;font-size:20px;margin:0;\">Empresa Demo S.L. — Resumen de reunión</h1>\n    <p style=\"color:#888;font-size:13px;margin:4px 0 0;\">${fechaES}</p>\n  </div>\n  <p style=\"margin:10px 0;line-height:1.6;\">${texto}</p>\n  <div style=\"border-top:1px solid #ccc;margin-top:28px;padding-top:12px;\">\n    <p style=\"color:#2c5f2d;font-weight:bold;font-size:14px;margin:0 0 4px;\">¿Algo que corregir o añadir?</p>\n    <p style=\"color:#666;font-size:13px;margin:0;\">Responde a este correo en lenguaje normal (por ejemplo: «donde dice X es Y»). Lo registramos y se aplicará en los siguientes resúmenes (semanal, mensual, etc.).</p>\n  </div>\n</div>`;\nlet limpio = limpioOriginal;\nlimpio = limpio.replace(/\\\\n/g, '\\n');           // normaliza saltos a reales\n// Títulos (### / ## / #) → MAYÚSCULAS con línea en blanco antes\nlimpio = limpio.replace(/^#{1,6}\\s*(.+)$/gm, (m, t) => '\\n' + t.toUpperCase().trim());\nlimpio = limpio.replace(/\\*\\*(.+?)\\*\\*/g, '$1'); // quita ** negritas\nlimpio = limpio.replace(/\\*(.+?)\\*/g, '$1');     // quita * cursivas\nlimpio = limpio.replace(/^\\s*[-*]\\s+/gm, '• ');  // viñetas como •\nlimpio = limpio.replace(/\\n{3,}/g, '\\n\\n');      // máximo una línea en blanco seguida\nlimpio = limpio.trim();\nreturn [{\n  json: {\n    ...item.json,\n    resumen_html: html,\n    resumen_limpio: limpio,\n    fecha_es: fechaES,\n    fecha_archivo: fechaES.replaceAll('/', '-'),\n    hora_archivo: horaArchivo\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -16
+      ],
+      "id": "932bbdf8-9ccd-45f3-89ba-1aa3fa5149a7",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/home/node/.n8n-files/<TU_PLANTILLA>.docx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        -368
+      ],
+      "id": "57c8ce99-3670-4eee-bcfb-e1043c68e678",
+      "name": "Leer plantilla DOCX"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1104,
+        -224
+      ],
+      "id": "d6bdf901-bfbb-4354-a14f-aabf0ea45f70",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "context": "={\n  \"cliente_nombre\": \"{{ $json.cliente_nombre }}\",\n  \"fecha_reunion\": \"{{ $json.fecha_es }}\",\n  \"asunto\": \"{{ $json.asunto }}\",\n  \"resumen\": \"{{ $json.resumen_limpio.replaceAll('\\n','\\\\n') }}\"\n}",
+        "options": {
+          "outputFileName": "=Resumen Empresa Demo {{ $json.fecha_archivo }} {{ $json.hora_archivo }}.docx",
+          "linebreaks": true
+        }
+      },
+      "type": "n8n-nodes-docxtemplater.docxTemplater",
+      "typeVersion": 1,
+      "position": [
+        1296,
+        -208
+      ],
+      "id": "6516caa4-ec1e-44c5-a4b0-b2e23d1b9f61",
+      "name": "DocxTemplater"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "736f7cf8-228d-4888-bf84-93e81c865730",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        624,
+        -160
+      ],
+      "id": "b97ec504-dec0-4c93-8c01-89447cd7c4c0",
+      "name": "If"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Correo Plaud (Gmail Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Parser Plaud",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parser Plaud": {
+      "main": [
+        [
+          {
+            "node": "Guardar transcripción (Postgres)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer plantilla DOCX": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "DocxTemplater",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DocxTemplater": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar transcripción (Postgres)": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Leer plantilla DOCX",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "00000000-0000-0000-0000-000000000000",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "DEMO_WORKFLOW_ID",
+  "tags": []
+}
