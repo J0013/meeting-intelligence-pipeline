@@ -191,6 +191,29 @@
       ],
       "id": "b97ec504-dec0-4c93-8c01-89447cd7c4c0",
       "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO hilos_resumen (transcripcion_id, cliente_id, gmail_thread_id, gmail_message_id, enviado_a)\nVALUES ($1, $2, $3, $4, $5)\nON CONFLICT (gmail_thread_id) DO NOTHING;",
+        "options": {
+          "queryReplacement": "={{ [$('Guardar transcripción (Postgres)').item.json.id, $('Guardar transcripción (Postgres)').item.json.cliente_id, $json.threadId, $json.id, 'demo@ejemplo.com'] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1856,
+        -208
+      ],
+      "id": "9a2d3fff-ac27-4327-83e8-e4df1f0cb72b",
+      "name": "Registrar hilo",
+      "credentials": {
+        "postgres": {
+          "id": "<TU_CREDENCIAL_POSTGRES>",
+          "name": "Postgres account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -287,6 +310,17 @@
           }
         ],
         []
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "Registrar hilo",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

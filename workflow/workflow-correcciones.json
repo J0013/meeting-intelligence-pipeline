@@ -1,0 +1,146 @@
+{
+  "name": "Flujo A - Intake de correcciones",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "parameters": {
+        "pollTimes": { "item": [ { "mode": "everyMinute" } ] },
+        "simple": true,
+        "filters": { "q": "subject:Plaud-AutoFlow -from:me" }
+      },
+      "credentials": {
+        "gmailOAuth2": { "id": "<TU_CREDENCIAL_GMAIL>", "name": "Gmail Plaud" }
+      }
+    },
+    {
+      "id": "buscarhilo",
+      "name": "Buscar hilo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [220, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT transcripcion_id, cliente_id, enviado_a\nFROM hilos_resumen\nWHERE gmail_thread_id = $1\nLIMIT 1;",
+        "options": { "queryReplacement": "={{ $json.threadId }}" }
+      },
+      "credentials": {
+        "postgres": { "id": "<TU_CREDENCIAL_POSTGRES>", "name": "Postgres Plaud" }
+      }
+    },
+    {
+      "id": "preparar",
+      "name": "Preparar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300],
+      "parameters": {
+        "jsCode": "// Vincula la respuesta del usuario con su transcripción y prepara el texto para Haiku.\n// Si 'Buscar hilo' devolvió 0 filas, este nodo no se ejecuta (la respuesta no era a un resumen).\nconst vinculo = $json; // transcripcion_id, cliente_id\nconst correo = $('Gmail Trigger').first().json;\n\n// Cuerpo del correo (texto plano preferido)\nlet cuerpo = correo.text || correo.textPlain || correo.snippet || '';\n\n// Quita la cita del correo original (sin regex): líneas '>' y todo lo posterior a \"... escribió:\" / \"... wrote:\"\nconst out = [];\nfor (const l of String(cuerpo).split('\\n')) {\n  const t = l.trim();\n  if (t.startsWith('>')) continue;\n  if (t.endsWith('escribió:') || t.endsWith('wrote:')) break;\n  out.push(l);\n}\n// ponytail: heurística simple de strip de cita; si tu cliente usa otro separador, amplía la condición.\ncuerpo = out.join('\\n').trim();\n\n// Autor (email del que corrige)\nlet autor = '';\nif (correo.from && correo.from.value && correo.from.value[0]) autor = correo.from.value[0].address;\nelse autor = correo.from || '';\n\nconst system_prompt = [\n'Eres un extractor de correcciones para un sistema de inteligencia de reuniones del sector agrícola (semillas).',\n'El usuario responde por correo a un resumen para corregir errores de transcripción, sobre todo en NOMBRES PROPIOS: personas/agricultores, variedades de semilla y sitios/fincas.',\n'',\n'Tu única tarea: leer el texto del usuario y devolver las correcciones en JSON estricto.',\n'',\n'Reglas:',\n'- Devuelve EXCLUSIVAMENTE un array JSON. Nada de texto antes o después, sin explicaciones, sin markdown.',\n'- Cada elemento: {\"texto_erroneo\": string, \"texto_correcto\": string, \"tipo\": \"persona\"|\"variedad\"|\"sitio\"|\"otro\"}.',\n'- Puede haber varias correcciones en un mismo correo: inclúyelas todas.',\n'- \"texto_erroneo\" es la forma equivocada tal como aparece en la transcripción; \"texto_correcto\" es la forma correcta que indica el usuario.',\n'- No inventes correcciones que el usuario no pide.',\n'- Si no hay ninguna corrección clara, devuelve [].',\n'',\n'Ejemplo de entrada: donde pone Martínez es Benítez, y la variedad era Lamuyo no Lamayo',\n'Salida: [{\"texto_erroneo\":\"Martínez\",\"texto_correcto\":\"Benítez\",\"tipo\":\"persona\"},{\"texto_erroneo\":\"Lamayo\",\"texto_correcto\":\"Lamuyo\",\"tipo\":\"variedad\"}]'\n].join('\\n');\n\nreturn [{ json: {\n  transcripcion_id: vinculo.transcripcion_id,\n  cliente_id: vinculo.cliente_id,\n  autor: autor,\n  texto_usuario: cuerpo,\n  system_prompt: system_prompt\n} }];"
+      }
+    },
+    {
+      "id": "haiku",
+      "name": "Haiku",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 1024, system: $json.system_prompt, messages: [{ role: 'user', content: $json.texto_usuario }] }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "<TU_CREDENCIAL_ANTHROPIC>", "name": "Anthropic API" }
+      }
+    },
+    {
+      "id": "parsear",
+      "name": "Parsear",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300],
+      "parameters": {
+        "jsCode": "// Parsea la salida JSON de Haiku. Devuelve UN ítem con la lista de correcciones + metadatos.\nconst resp = $json;\nconst prep = $('Preparar').first().json;\nconst trig = $('Gmail Trigger').first().json;\nlet texto = (resp.content && resp.content[0] && resp.content[0].text) ? resp.content[0].text : '[]';\ntexto = texto.replace('```json', '').replace('```', '').trim();\nlet arr = [];\ntry { arr = JSON.parse(texto); } catch (e) { arr = []; }\nif (!Array.isArray(arr)) arr = [];\nconst correcciones = arr.filter(c => c && c.texto_erroneo && c.texto_correcto).map(c => ({\n  texto_erroneo: String(c.texto_erroneo).trim(),\n  texto_correcto: String(c.texto_correcto).trim(),\n  tipo: c.tipo || 'otro'\n}));\nreturn [{ json: {\n  transcripcion_id: prep.transcripcion_id,\n  cliente_id: prep.cliente_id,\n  autor: prep.autor,\n  threadId: trig.threadId,\n  messageId: trig.id,\n  correcciones: correcciones,\n  n: correcciones.length\n} }];"
+      }
+    },
+    {
+      "id": "expandir",
+      "name": "Expandir",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 180],
+      "parameters": {
+        "jsCode": "// Expande la lista a N ítems (0 si no hubo correcciones) para insertarlas.\nconst base = $json;\nreturn (base.correcciones || []).map(c => ({ json: {\n  transcripcion_id: base.transcripcion_id,\n  cliente_id: base.cliente_id,\n  autor: base.autor,\n  texto_erroneo: c.texto_erroneo,\n  texto_correcto: c.texto_correcto,\n  tipo: c.tipo\n} }));"
+      }
+    },
+    {
+      "id": "insertar",
+      "name": "Insertar corrección",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1320, 180],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO correcciones (transcripcion_id, cliente_id, texto_erroneo, texto_correcto, tipo, autor)\nVALUES ($1, $2, $3, $4, $5, $6)\nRETURNING id;",
+        "options": { "queryReplacement": "={{ [$json.transcripcion_id, $json.cliente_id, $json.texto_erroneo, $json.texto_correcto, $json.tipo, $json.autor] }}" }
+      },
+      "credentials": {
+        "postgres": { "id": "<TU_CREDENCIAL_POSTGRES>", "name": "Postgres Plaud" }
+      }
+    },
+    {
+      "id": "acuse",
+      "name": "Acuse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 420],
+      "parameters": {
+        "jsCode": "// Mensaje de acuse según haya o no correcciones. Siempre 1 ítem -> el usuario siempre sabe que su respuesta llegó.\nconst j = $json;\nconst mensaje = j.n > 0\n  ? 'Añadido a correcciones.'\n  : 'He recibido tu mensaje pero no he identificado ninguna corrección clara. Si quieres corregir algo, indícamelo así: «donde pone X es Y».';\nreturn [{ json: { messageId: j.messageId, mensaje: mensaje } }];"
+      }
+    },
+    {
+      "id": "responder",
+      "name": "Responder acuse",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1540, 300],
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $json.messageId }}",
+        "emailType": "text",
+        "message": "={{ $json.mensaje }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": { "id": "<TU_CREDENCIAL_GMAIL>", "name": "Gmail Plaud" }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [[{ "node": "Buscar hilo", "type": "main", "index": 0 }]] },
+    "Buscar hilo": { "main": [[{ "node": "Preparar", "type": "main", "index": 0 }]] },
+    "Preparar": { "main": [[{ "node": "Haiku", "type": "main", "index": 0 }]] },
+    "Haiku": { "main": [[{ "node": "Parsear", "type": "main", "index": 0 }]] },
+    "Parsear": { "main": [[{ "node": "Expandir", "type": "main", "index": 0 }, { "node": "Acuse", "type": "main", "index": 0 }]] },
+    "Expandir": { "main": [[{ "node": "Insertar corrección", "type": "main", "index": 0 }]] },
+    "Acuse": { "main": [[{ "node": "Responder acuse", "type": "main", "index": 0 }]] }
+  }
+}
