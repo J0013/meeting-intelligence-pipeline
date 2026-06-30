@@ -140,10 +140,24 @@ flowchart LR
 
     CR -.->|diccionario por cliente| F
 
+    subgraph W3["Workflow 3 · Agregación (pirámide semanal → mensual)"]
+        AS[Claude Sonnet 5<br/>reuniones → resumen semanal]
+        AM[Claude Sonnet 5<br/>semanales → resumen mensual]
+        AD[Generación DOCX<br/>resumen mensual]
+    end
+    F -->|reuniones del periodo| AS
+    AS --> AG[(resumenes_agregados)]
+    AG -->|semanales del mes| AM
+    AM --> AG
+    AG -->|resumen mensual| AD
+    AD --> AM2([Entrega del mensual por correo])
+
     subgraph Infra["Self-hosted · Docker"]
         W1
         W2
+        W3
         F
+        AG
         L
         CR
     end
