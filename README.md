@@ -234,7 +234,8 @@ necesario, y el despliegue es reproducible.
    Anthropic para correcciones y agregación mensual). Nada de esto viaja en el
    repo: todos los valores sensibles son placeholders `<TU_...>`.
 5. Ajustar las plantillas del documento a la marca propia
-   ([`templates/plantilla-mensual.docx`](templates/plantilla-mensual.docx)).
+   ([`templates/`](templates/): diaria, semanal y mensual; el logo y el pie son
+   placeholders neutros).
 
 ## 🗂️ Estructura
 
@@ -250,6 +251,8 @@ meeting-intelligence-pipeline/
 │  ├─ workflow-agregacion-mensual.json  # export n8n: agregación mensual (anonimizado)
 │  └─ workflow-documento-mensual.json   # export n8n: documento mensual (anonimizado)
 ├─ templates/
+│  ├─ plantilla-diaria.docx             # plantilla DOCX del resumen por reunión
+│  ├─ plantilla-semanal.docx            # plantilla DOCX del resumen semanal
 │  └─ plantilla-mensual.docx            # plantilla DOCX del resumen mensual
 ├─ docs/                # diagramas y prompts
 │  └─ prompt-claude-code-mensual.md     # system prompt de la agregación mensual
