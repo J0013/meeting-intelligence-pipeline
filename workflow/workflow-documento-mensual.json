@@ -1,0 +1,234 @@
+{
+  "name": "Flujo Plaud — Documento Mensual",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "5ef99652-a600-457e-aa81-af24e0a4ce17",
+      "name": "Disparo manual",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, cliente_id, nivel,\n       periodo_inicio::text AS periodo_inicio,\n       periodo_fin::text AS periodo_fin,\n       contenido, fuentes\nFROM resumenes_agregados\nWHERE nivel = 'mensual'\n  AND periodo_fin = (date_trunc('month', CURRENT_DATE) - interval '1 day')::date\nORDER BY id DESC\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "dd8183ff-f2b2-4ba1-a837-a378d985dcf1",
+      "name": "Execute a SQL query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -272,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "<TU_CREDENCIAL_POSTGRES>",
+          "name": "Postgres Plaud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parser del resumen MENSUAL para DOCX con DocxTemplater\nconst item = $input.first();\nconst contenido = String(item.json.contenido || '').replace(/\\r/g, '');\nconst inicio = String(item.json.periodo_inicio || '');\n\n// ---- 1) Periodo legible: \"Junio de 2026\" ----\nconst meses = ['enero','febrero','marzo','abril','mayo','junio',\n               'julio','agosto','septiembre','octubre','noviembre','diciembre'];\nfunction mesAnio(fecha) {\n  const d = new Date(new Date(fecha).getTime() + 2 * 60 * 60 * 1000);\n  const m = meses[d.getUTCMonth()];\n  return m.charAt(0).toUpperCase() + m.slice(1) + ' de ' + d.getUTCFullYear();\n}\nconst periodo = inicio ? mesAnio(inicio) : '';\n\n// ---- 2) Trocear por las 4 secciones del MENSUAL ----\nconst TITULOS = ['ESTADO DEL MES', 'EVOLUCION Y PATRONES', 'DECISIONES CLAVE DEL MES', 'PRIORIDADES DEL MES SIGUIENTE'];\nfunction norm(s){ return s.replace(/Ó/g,'O').replace(/Á/g,'A').replace(/É/g,'E').replace(/Í/g,'I').replace(/Ú/g,'U'); }\nconst contNorm = norm(contenido);\nfunction seccionesPorIndice(texto, textoNorm) {\n  const idx = TITULOS.map(t => ({ t, i: textoNorm.indexOf(t) })).filter(o => o.i !== -1);\n  const out = {};\n  for (let k = 0; k < idx.length; k++) {\n    const ini = idx[k].i + idx[k].t.length;\n    const finSec = (k + 1 < idx.length) ? idx[k + 1].i : texto.length;\n    out[idx[k].t] = texto.slice(ini, finSec).trim();\n  }\n  return out;\n}\nconst secs = seccionesPorIndice(contenido, contNorm);\n\nconst estado_mes  = secs['ESTADO DEL MES'] || '';\nconst evolucion   = secs['EVOLUCION Y PATRONES'] || '';\nconst decisiones  = secs['DECISIONES CLAVE DEL MES'] || '';\nconst prioridades = secs['PRIORIDADES DEL MES SIGUIENTE'] || '';\n\nfunction separarSubapartados(bloque) {\n  const reID = /^I\\+D[^\\n:]*:\\s*$/m;\n  const reCom = /^Comercial[^\\n:]*:\\s*$/m;\n  const idMatch = bloque.match(reID);\n  const comMatch = bloque.match(reCom);\n  let id = '', comercial = '';\n  if (idMatch && comMatch) {\n    const iID = bloque.indexOf(idMatch[0]);\n    const iCom = bloque.indexOf(comMatch[0]);\n    if (iID < iCom) {\n      id = bloque.slice(iID + idMatch[0].length, iCom).trim();\n      comercial = bloque.slice(iCom + comMatch[0].length).trim();\n    } else {\n      comercial = bloque.slice(iCom + comMatch[0].length, iID).trim();\n      id = bloque.slice(iID + idMatch[0].length).trim();\n    }\n  } else if (idMatch) {\n    id = bloque.slice(bloque.indexOf(idMatch[0]) + idMatch[0].length).trim();\n  } else if (comMatch) {\n    comercial = bloque.slice(bloque.indexOf(comMatch[0]) + comMatch[0].length).trim();\n  } else {\n    id = bloque.trim();\n  }\n  return { id, comercial };\n}\n\nconst evoSub = separarSubapartados(evolucion);\nconst decSub = separarSubapartados(decisiones);\n\nfunction separarPrioridades(bloque) {\n  const lineas = bloque.split(/\\n/).map(l => l.trim()).filter(l => l.startsWith('- '));\n  let id = [], comercial = [];\n  for (let l of lineas) {\n    const mDep = l.match(/\\|\\s*Departamento:\\s*(.+?)\\s*$/i);\n    const dep = mDep ? mDep[1].trim() : 'Comercial';\n    let texto = l.replace(/\\s*\\|\\s*Departamento:\\s*.+$/i, '').trim();\n    texto = texto.replace(/^- \\[?/, '- ').replace(/\\]$/, '');\n    if (/I\\+?D/i.test(dep)) id.push(texto); else comercial.push(texto);\n  }\n  return { id: id.join('\\n'), comercial: comercial.join('\\n') };\n}\nconst priSub = separarPrioridades(prioridades);\n\nfunction jsonSafe(s) {\n  return String(s || '').replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"');\n}\n\nreturn [{\n  json: {\n    ...item.json,\n    periodo,\n    estado_mes: jsonSafe(estado_mes),\n    evolucion_id: jsonSafe(evoSub.id),\n    evolucion_comercial: jsonSafe(evoSub.comercial),\n    decisiones_id: jsonSafe(decSub.id),\n    decisiones_comercial: jsonSafe(decSub.comercial),\n    prioridades_id: jsonSafe(priSub.id),\n    prioridades_comercial: jsonSafe(priSub.comercial)\n  }\n}];"
+      },
+      "id": "7af44feb-e1b0-4ce2-aab7-a85145fa0bf6",
+      "name": "Code in JavaScript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/home/node/.n8n-files/plantilla-mensual.docx",
+        "options": {}
+      },
+      "id": "f4eecf17-c6da-491b-aaf7-b0028fea0d29",
+      "name": "Leer plantilla DOCX",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -32,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "fe487de8-0511-438c-b95a-5e4ca01061aa",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        208,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "context": "={\n  \"periodo\": \"{{ $('Code in JavaScript').item.json.periodo }}\",\n  \"estado_mes\": \"{{ $('Code in JavaScript').item.json.estado_mes.replaceAll('\\n','\\\\n') }}\",\n  \"evolucion_id\": \"{{ $('Code in JavaScript').item.json.evolucion_id.replaceAll('\\n','\\\\n') }}\",\n  \"evolucion_comercial\": \"{{ $('Code in JavaScript').item.json.evolucion_comercial.replaceAll('\\n','\\\\n') }}\",\n  \"decisiones_id\": \"{{ $('Code in JavaScript').item.json.decisiones_id.replaceAll('\\n','\\\\n') }}\",\n  \"decisiones_comercial\": \"{{ $('Code in JavaScript').item.json.decisiones_comercial.replaceAll('\\n','\\\\n') }}\",\n  \"prioridades_id\": \"{{ $('Code in JavaScript').item.json.prioridades_id.replaceAll('\\n','\\\\n') }}\",\n  \"prioridades_comercial\": \"{{ $('Code in JavaScript').item.json.prioridades_comercial.replaceAll('\\n','\\\\n') }}\"\n}",
+        "options": {
+          "outputFileName": "=Resumen mensual {{ $('Code in JavaScript').item.json.periodo }}.docx",
+          "linebreaks": true
+        }
+      },
+      "id": "aea76c18-d83e-4af9-9241-f477557c334e",
+      "name": "DocxTemplater",
+      "type": "n8n-nodes-docxtemplater.docxTemplater",
+      "typeVersion": 1,
+      "position": [
+        432,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "demo@ejemplo.com",
+        "subject": "=Resumen mensual — {{ $('Code in JavaScript').item.json.periodo }}",
+        "message": "=Adjunto el resumen mensual correspondiente a {{ $('Code in JavaScript').item.json.periodo }}.",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {}
+            ]
+          }
+        }
+      },
+      "id": "6910d379-48ff-4dc8-961b-e5e0081770d8",
+      "name": "Send a message",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        784,
+        160
+      ],
+      "webhookId": "",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "<TU_CREDENCIAL_GMAIL>",
+          "name": "Gmail Plaud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 45 9 1-7 * 1"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -528,
+        304
+      ],
+      "id": "8f48292a-68f0-492a-8204-e46a446704c0",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "connections": {
+    "Disparo manual": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Leer plantilla DOCX",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer plantilla DOCX": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "DocxTemplater",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DocxTemplater": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

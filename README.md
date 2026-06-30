@@ -83,6 +83,30 @@ corrige de forma recurrente, el sistema tiene la base para auto-corregirlo en
 futuras transcripciones. El usuario no entrena nada a propósito: **entrena el
 sistema con solo contestar un correo**.
 
+### Workflow 3 — Agregación (la pirámide de resúmenes)
+
+Capturar bien cada reunión es la base. Encima se construye una **pirámide de
+memoria** que sube de altura sin pedirle nada al usuario: las reuniones se
+agregan en resúmenes **semanales**, y esos semanales se destilan en un resumen
+**mensual**. Cada nivel resume al de abajo y conserva el del periodo anterior
+(rotación de memoria), de modo que el sistema recuerda lo que un humano no
+retiene de un mes para otro.
+
+El **nivel mensual no es un semanal más largo**: cambia el enfoque a **visión de
+conjunto** para quien decide. Con **Claude Sonnet 5** el sistema:
+
+- **Traza la evolución** de cada tema a lo largo del mes (apareció, avanzó, se
+  cerró o sigue abierto).
+- **Detecta patrones** y recurrencias (clientes, temas o cifras que se repiten).
+- **Marca lo atascado**: lo que lleva varias semanas sin moverse, con el número
+  de semanas que lleva abierto.
+- **Sintetiza para decidir**: estado del mes, decisiones clave y de 3 a 5
+  prioridades para el mes siguiente, sin copiar tarea por tarea.
+
+El resultado se entrega como **documento Word** por correo, igual que el resto:
+mismo canal, cero pasos nuevos. El *system prompt* completo está documentado en
+[`docs/prompt-claude-code-mensual.md`](docs/prompt-claude-code-mensual.md).
+
 ## 🏗️ Arquitectura
 
 ```mermaid
@@ -135,6 +159,7 @@ flowchart LR
 | Documentos | Generación de DOCX con plantilla |
 | Captura | Dispositivo Plaud (grabación + transcripción) |
 | Extracción de correcciones | Claude Haiku (texto libre → JSON) |
+| Agregación mensual | Claude Sonnet 5 (síntesis ejecutiva) |
 | Entrada/salida | Correo electrónico (Gmail) |
 
 ## 🎯 Decisiones de diseño interesantes
@@ -146,11 +171,12 @@ reenvía, se reintenta o llega duplicado, el sistema lo reconoce y lo ignora. El
 resultado es **idempotencia**: ejecutar el flujo dos veces produce el mismo
 estado, sin duplicados ni reprocesos.
 
-**Separar la captura individual de la agregación futura.**
-La Fase 1 se centra en capturar *bien* cada reunión, una a una. El diseño deja la
-puerta abierta —pero no implementada— a agregaciones (semanal, mensual, anual)
-sin reescribir la captura. Capturar y agregar son responsabilidades distintas y
-se mantienen desacopladas a propósito.
+**Separar la captura individual de la agregación.**
+Capturar *bien* cada reunión es una responsabilidad; agregar es otra, y se
+mantienen desacopladas a propósito. Sobre la captura se construye una pirámide
+(semanal → mensual) que lee de `resumenes_agregados`, no de las transcripciones
+crudas: cada nivel se apoya en el de abajo. Añadir un nivel más (p. ej. anual) no
+obliga a tocar la captura.
 
 **Mantener el dato limpio en origen.**
 Como el dato se normaliza y deduplica *antes* de persistirse, la base de datos no
@@ -185,13 +211,16 @@ necesario, y el despliegue es reproducible.
 2. Aplicar el esquema y las tablas de la capa de aprendizaje:
    [`db/schema.sql`](db/schema.sql), [`db/vinculo_hilo_resumen.sql`](db/vinculo_hilo_resumen.sql)
    y [`db/correcciones.sql`](db/correcciones.sql).
-3. Importar los dos workflows anonimizados:
-   [`workflow/workflow-captura.json`](workflow/workflow-captura.json) y
-   [`workflow/workflow-correcciones.json`](workflow/workflow-correcciones.json).
+3. Importar los workflows anonimizados:
+   [`workflow-captura.json`](workflow/workflow-captura.json),
+   [`workflow-correcciones.json`](workflow/workflow-correcciones.json),
+   [`workflow-agregacion-mensual.json`](workflow/workflow-agregacion-mensual.json) y
+   [`workflow-documento-mensual.json`](workflow/workflow-documento-mensual.json).
 4. Rellenar las credenciales propias en n8n (Gmail, PostgreSQL y la API de
-   Anthropic para el workflow de correcciones). Nada de esto viaja en el repo:
-   todos los valores sensibles son placeholders `<TU_...>`.
-5. Ajustar la plantilla del documento a la marca propia.
+   Anthropic para correcciones y agregación mensual). Nada de esto viaja en el
+   repo: todos los valores sensibles son placeholders `<TU_...>`.
+5. Ajustar las plantillas del documento a la marca propia
+   ([`templates/plantilla-mensual.docx`](templates/plantilla-mensual.docx)).
 
 ## 🗂️ Estructura
 
@@ -202,9 +231,14 @@ meeting-intelligence-pipeline/
 │  ├─ vinculo_hilo_resumen.sql   # enlaza hilo de correo ↔ reunión
 │  └─ correcciones.sql           # log inmutable de correcciones
 ├─ workflow/
-│  ├─ workflow-captura.json      # export n8n: captura (anonimizado)
-│  └─ workflow-correcciones.json # export n8n: correcciones (anonimizado)
-├─ docs/                # capturas y diagramas
+│  ├─ workflow-captura.json             # export n8n: captura (anonimizado)
+│  ├─ workflow-correcciones.json        # export n8n: correcciones (anonimizado)
+│  ├─ workflow-agregacion-mensual.json  # export n8n: agregación mensual (anonimizado)
+│  └─ workflow-documento-mensual.json   # export n8n: documento mensual (anonimizado)
+├─ templates/
+│  └─ plantilla-mensual.docx            # plantilla DOCX del resumen mensual
+├─ docs/                # diagramas y prompts
+│  └─ prompt-claude-code-mensual.md     # system prompt de la agregación mensual
 ├─ .env.example         # plantilla de variables de entorno
 ├─ LICENSE
 ├─ CONTRIBUTING.md

@@ -1,0 +1,260 @@
+{
+  "name": "Agregacion MENSUAL (manual)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7564b482-de3c-4d12-ad85-154ca552421a",
+      "name": "Disparo manual",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        720,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f1",
+              "name": "fecha",
+              "value": "={{ $now.startOf('month').minus({ days: 1 }).toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            },
+            {
+              "id": "f2",
+              "name": "cliente_id",
+              "value": "client_demo",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "305ad02b-0184-4daf-8945-310f6e97738e",
+      "name": "Parametros",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        992,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Mes natural de la fecha pasada. Agrega los resumenes SEMANALES cuyo domingo (periodo_fin)\n-- cae dentro de ese mes (opcion B: semanas completas, sin partir).\nWITH p AS (\n  SELECT date_trunc('month', $1::date)::date                          AS p_inicio,\n         (date_trunc('month', $1::date) + interval '1 month - 1 day')::date AS p_fin\n),\n-- Semanales de ESTE mes, solo del cliente. Concatena contenido + ids.\nnuevas AS (\n  SELECT r.cliente_id,\n         string_agg(r.contenido, E'\\n\\n===\\n\\n' ORDER BY r.periodo_inicio) AS texto_nuevo,\n         array_agg(r.id ORDER BY r.periodo_inicio)                          AS ids\n  FROM resumenes_agregados r, p\n  WHERE r.cliente_id = $2\n    AND r.nivel = 'semanal'\n    AND r.periodo_fin >= p.p_inicio\n    AND r.periodo_fin <= p.p_fin\n  GROUP BY r.cliente_id\n),\n-- Resumen MENSUAL anterior (rotacion). Puede no existir.\nanterior AS (\n  SELECT r.contenido AS resumen_anterior\n  FROM resumenes_agregados r, p\n  WHERE r.cliente_id = $2\n    AND r.nivel = 'mensual'\n    AND r.periodo_inicio < p.p_inicio\n  ORDER BY r.periodo_inicio DESC\n  LIMIT 1\n)\nSELECT $2::text                       AS cliente_id,\n       'mensual'::text                AS nivel,\n       p.p_inicio::text               AS periodo_inicio,\n       p.p_fin::text                  AS periodo_fin,\n       n.texto_nuevo,\n       n.ids,\n       COALESCE(a.resumen_anterior,'') AS resumen_anterior\nFROM p\nJOIN nuevas n   ON true          -- INNER: sin semanales => 0 filas => el flujo para aqui\nLEFT JOIN anterior a ON true;",
+        "options": {
+          "queryReplacement": "={{ [$json.fecha, $json.cliente_id] }}"
+        }
+      },
+      "id": "9d35ab61-bd4f-4595-a783-dc911b3c8a21",
+      "name": "Datos mes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1232,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "<TU_CREDENCIAL_POSTGRES>",
+          "name": "Postgres Plaud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Construye el system prompt de Sonnet, el contenido de usuario y el array de fuentes.\nconst row = $json;\n\n// ids puede llegar como array (driver pg parsea int[]) o como texto '{1,2,3}'. Normalizamos.\nlet ids = [];\nif (Array.isArray(row.ids)) {\n  ids = row.ids.map(Number).filter(n => !Number.isNaN(n));\n} else if (row.ids) {\n  ids = String(row.ids).replace(/[{}]/g, '').split(',').map(s => s.trim()).filter(Boolean).map(Number);\n}\n// Literal de array Postgres: '{}' si no hay nada. Se castea a int[] en el UPSERT.\nconst fuentes = '{' + ids.join(',') + '}';\n\nconst resumenAnterior = (row.resumen_anterior || '').trim();\nconst textoNuevo = (row.texto_nuevo || '').trim();\n\n// --- System prompt MENSUAL de Sonnet ---\nconst system_prompt = [\n'Eres un analista que mantiene la MEMORIA MENSUAL de una pyme de semillas, para el dueno que dirige comercial e I+D y quiere la foto de altura del mes para decidir. NO es un semanal mas largo: es vision de conjunto.',\n'',\n'Entrada: RESUMEN_MES_ANTERIOR (puede venir vacio el primer mes) y RESUMENES_SEMANALES_DEL_MES (los semanales del mes separados por \"===\"). Genera UN resumen mensual.',\n'',\n'ORTOGRAFIA (IMPORTANTE)',\n'- Escribe en español correcto y natural, con TODAS las tildes y la ñ. Ejemplos de como DEBES escribir: \"planificacion\" -> \"planificación\", \"melon\" -> \"melón\", \"decision\" -> \"decisión\", \"politica\" -> \"política\", \"oidio\" -> \"oídio\", \"pulgon\" -> \"pulgón\", \"logistica\" -> \"logística\", \"Espana\" -> \"España\", \"numero\" -> \"número\".',\n'- Aplica esto SIEMPRE, igual en la prosa que en las listas con guion. NUNCA sustituyas una vocal acentuada por la version sin tilde, ni uses mayusculas intercaladas (escribe \"oídio\", no \"oIdio\").',\n'',\n'CONECTA Y MUESTRA EVOLUCION',\n'- Identifica temas que aparecen en varias semanas y traza su evolucion (aparecio, avanzo, se cerro o sigue abierto). Lo que un humano no retiene y el sistema si: que se note.',\n'- Marca lo que lleva varias semanas ATASCADO sin moverse, indicando cuantas semanas lleva abierto (ej. \"Atascado: 3 semanas\").',\n'- Detecta PATRONES y recurrencias (clientes, temas o cifras que se repiten a lo largo del mes) y nombralos explicitamente.',\n'',\n'FIDELIDAD',\n'- Manten EXACTAS las CIFRAS (importes, cantidades, fechas, plazos, %) y los nombres propios. No redondees ni inventes. Si algo es ambiguo, dilo.',\n'',\n'PESO Y SÍNTESIS',\n'- Mas sintesis y menos detalle linea a linea que un semanal. Destila lo que importa para decidir; no copies todas las tareas.',\n'- El mes anterior solo se conserva si sigue vivo; si se cerro o quedo superado, no lo arrastres.',\n'',\n'VERTIENTES',\n'- Agrupa por COMERCIAL (ventas, clientes, precios, mercado, cobros) e I+D (ensayos, variedades, portainjertos, germinaciones, demos) cuando haya de ambas. Si solo hay de una, incluye solo esa: NO crees el apartado vacio.',\n'- El rotulo de vertiente va EXACTAMENTE asi, en su propia linea y terminado en dos puntos: \"I+D:\" o \"Comercial:\". No anadas nada mas en esa linea.',\n'',\n'FORMA (TEXTO PLANO, SIN MARKDOWN)',\n'- Frases directas. NADA de #, ** ni tablas con |, salvo el separador de PRIORIDADES que se indica abajo.',\n'- Encabezados de seccion en MAYUSCULAS en su propia linea, sin numeracion ni simbolos. Escribelos EXACTAMENTE asi: ESTADO DEL MES, EVOLUCION Y PATRONES, DECISIONES CLAVE DEL MES, PRIORIDADES DEL MES SIGUIENTE.',\n'- Puntos de lista empezando por \"- \".',\n'- Secciones (omite la que este vacia, pero manten este orden):',\n'  ESTADO DEL MES: 3-4 frases con la foto de altura del mes. Sin sublistas ni vertientes, solo prosa.',\n'  EVOLUCION Y PATRONES: que se movio, que se cerro, que sigue atascado (con n de semanas que lleva abierto si aplica), que temas o clientes recurren. Agrupa por vertiente si aplica.',\n'  DECISIONES CLAVE DEL MES: las decisiones de peso, no todas. Agrupa por vertiente si aplica.',\n'  PRIORIDADES DEL MES SIGUIENTE: de 3 a 5 focos claros, NO una tabla de 20 tareas. Una por linea con formato exacto \"- [foco] | Departamento: I+D\" o \"- [foco] | Departamento: Comercial\". El departamento es I+D si el foco es de ensayos, variedades, germinaciones o tecnico; Comercial si es de ventas, clientes, pedidos o logistica comercial.',\n'- Devuelve SOLO el texto del resumen, sin preambulos ni cierres.'\n].join('\\n');\n\nconst user_content =\n  'MES_QUE_RESUMES: del ' + row.periodo_inicio + ' al ' + row.periodo_fin + '.' +\n  '\\n\\nRESUMEN_MES_ANTERIOR:\\n' + (resumenAnterior || '(vacio - es el primer mes)') +\n  '\\n\\nRESUMENES_SEMANALES_DEL_MES:\\n' + (textoNuevo || '(sin semanas)');\n\nreturn [{ json: {\n  cliente_id: row.cliente_id,\n  nivel: row.nivel,\n  periodo_inicio: row.periodo_inicio,\n  periodo_fin: row.periodo_fin,\n  fuentes: fuentes,\n  system_prompt: system_prompt,\n  user_content: user_content\n} }];"
+      },
+      "id": "e39c1d11-13ad-47e6-bfc9-e858e32218fe",
+      "name": "Preparar prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 8000, system: $json.system_prompt, messages: [{ role: 'user', content: $json.user_content }] }) }}",
+        "options": {}
+      },
+      "id": "afe8bb42-da1f-46b7-a5c7-01cfc7c83d5e",
+      "name": "Sonnet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1712,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "<TU_CREDENCIAL_ANTHROPIC>",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Saca el texto de la respuesta de Sonnet y arma la fila para el UPSERT.\nconst resp = $json;\nconst prep = $('Preparar prompt').item.json;\n\n// Sonnet 5 puede devolver un bloque \"thinking\" antes del \"text\".\n// Buscamos el bloque de tipo 'text' en vez de asumir la posicion 0.\nlet contenido = '';\nif (Array.isArray(resp.content)) {\n  const bloqueTexto = resp.content.find(b => b && b.type === 'text' && b.text);\n  contenido = bloqueTexto ? bloqueTexto.text.trim() : '';\n}\nif (!contenido) throw new Error('Sonnet no devolvio texto: ' + JSON.stringify(resp).slice(0, 500));\n\nreturn [{ json: {\n  cliente_id: prep.cliente_id,\n  nivel: prep.nivel,\n  periodo_inicio: prep.periodo_inicio,\n  periodo_fin: prep.periodo_fin,\n  contenido: contenido,\n  fuentes: prep.fuentes\n} }];"
+      },
+      "id": "b7818912-e495-4eca-8b10-06fd75eeeae3",
+      "name": "Preparar fila",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO resumenes_agregados (cliente_id, nivel, periodo_inicio, periodo_fin, contenido, fuentes)\nVALUES ($1, $2, $3, $4, $5, $6::int[])\nON CONFLICT (cliente_id, nivel, periodo_inicio)\nDO UPDATE SET periodo_fin = EXCLUDED.periodo_fin,\n              contenido   = EXCLUDED.contenido,\n              fuentes     = EXCLUDED.fuentes,\n              creado_en   = now();",
+        "options": {
+          "queryReplacement": "={{ [$json.cliente_id, $json.nivel, $json.periodo_inicio, $json.periodo_fin, $json.contenido, $json.fuentes] }}"
+        }
+      },
+      "id": "bf243798-b4ef-4514-98f1-169729ea1bfa",
+      "name": "Upsert resumen",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2192,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "<TU_CREDENCIAL_POSTGRES>",
+          "name": "Postgres Plaud"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 30 9 1-7 * 1"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        176
+      ],
+      "id": "5a6beb2c-5b4f-4180-808a-bbf55f1c15fa",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "connections": {
+    "Disparo manual": {
+      "main": [
+        [
+          {
+            "node": "Parametros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parametros": {
+      "main": [
+        [
+          {
+            "node": "Datos mes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Datos mes": {
+      "main": [
+        [
+          {
+            "node": "Preparar prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar prompt": {
+      "main": [
+        [
+          {
+            "node": "Sonnet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sonnet": {
+      "main": [
+        [
+          {
+            "node": "Preparar fila",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar fila": {
+      "main": [
+        [
+          {
+            "node": "Upsert resumen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parametros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
